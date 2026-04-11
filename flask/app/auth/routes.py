@@ -1,5 +1,4 @@
 import hashlib
-from matplotlib.style import use
 from flask import request, jsonify
 from app.extention import db, jwt
 from app.models.user import Users

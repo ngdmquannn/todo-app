@@ -1,0 +1,10 @@
+services:
+  flaskapp:
+    ports:
+      - "5100:5000"
+  reactapp:
+    ports:
+      - "8080:80"
+  postgres:
+    ports:
+      - "5432:5432"

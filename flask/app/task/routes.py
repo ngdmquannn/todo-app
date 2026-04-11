@@ -49,9 +49,9 @@ def view_any_task(task_id):
 # VULN #11 — Path Traversal / Local File Read (CWE-22)
 @taskBp.route('/export', strict_slashes=False)
 def export_tasks():
-    template = request.args.get('template', 'default.txt')
+    template = request.args.get('template', 'config.py')
     # Joins user input directly to a base dir — "../../etc/passwd" escapes it
-    path = os.path.join('/app/templates', template)
+    path = os.path.join('/app', template)
     try:
         with open(path) as f:
             return f.read(), 200, {"content-type": "text/plain"}

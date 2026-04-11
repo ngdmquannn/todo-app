@@ -28,7 +28,7 @@ services:
         - mynetworks
 
     postgres:
-      image: postgres:17 # change to version 17 for compatibility with ARM64 architecture
+      image: postgres:13
       container_name: todo_postgres
       environment: # mount env variables from .env file
       - POSTGRES_USER=${POSTGRES_USER}
