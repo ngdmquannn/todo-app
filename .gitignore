@@ -1,0 +1,17 @@
+**/__pycache__/
+.env
+.env.dev
+.env.cicd.*
+**/migrations
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.tfvars
+./infra/
+node_modules/
+*.log
+.DS_Store
+CLAUDE.md
+# Local-only security notes (kept for README later, do not commit)
+SECURITY_VULNERABILITIES.md

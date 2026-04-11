@@ -1,0 +1,46 @@
+version: '3'
+services:
+    flaskapp:
+      build:
+        context: ./flask
+        dockerfile: Dockerfile
+      container_name: todo_flask
+      environment: # mount env variables from .env file
+      - SQLALCHEMY_DATABASE_URI=${SQLALCHEMY_DATABASE_URI}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      depends_on: 
+        - postgres
+      networks:
+        - mynetworks
+  # I want to mount the static files from react build to the local file to simulate serving from S3
+
+  
+      volumes:
+        - ./react/dist:/usr/src/app/static
+    reactapp:
+      build: 
+        context: ./react
+        dockerfile: Dockerfile
+      container_name: todo_react
+      depends_on:
+        - flaskapp
+      networks:
+        - mynetworks
+
+    postgres:
+      image: postgres:17 # change to version 17 for compatibility with ARM64 architecture
+      container_name: todo_postgres
+      environment: # mount env variables from .env file
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      volumes:
+        - postgres-volume:/var/lib/postgresql/data
+        - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      networks: 
+        - mynetworks
+
+networks:
+  mynetworks:
+volumes:
+  postgres-volume:
