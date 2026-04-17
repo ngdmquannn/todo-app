@@ -1,12 +1,19 @@
-# VULN #9 — Insecure Dockerfile (CWE-250, CWE-1269)
-#   - uses outdated Python image with known CVEs
-#   - copies everything (.env, .git, creds) into the image
-#   - runs pip as root, no --no-cache-dir
-#   - final container runs as root
-#   - Flask debug mode exposed on 0.0.0.0 (see run.py)
-FROM python:3.9
-COPY . /app
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r app && useradd -r -g app -m -d /home/app app
+
 WORKDIR /app
-RUN pip install -r requirements.txt
+
+COPY --chown=app:app requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge -y build-essential \
+    && apt-get autoremove -y
+
+COPY --chown=app:app . /app
+
+USER app
 EXPOSE 5000
-CMD ["python","run.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--access-logfile", "-", "run:app"]

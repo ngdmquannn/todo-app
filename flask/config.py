@@ -3,18 +3,21 @@ from dotenv import load_dotenv
 from datetime import timedelta
 load_dotenv()
 
+
 class Config:
     SQLALCHEMY_DATABASE_URI = os.getenv('SQLALCHEMY_DATABASE_URI')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
     JWT_TOKEN_LOCATION = ["headers"]
-    # VULN #2 — weak/default JWT secret (CWE-798, CWE-521)
-    JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'secret')
+    JWT_SECRET_KEY = os.environ['JWT_SECRET_KEY']
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15)
-    JWT_REFRESG_TOKEN_EXPIRES = timedelta(days=30)
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
 
-    # VULN #8 — CSRF protection disabled (CWE-352)
+    DEBUG = False
+
+    # VULN #8 (kept) — CSRF protection disabled
+    # Left off because the app is a JWT-bearer SPA; an attacker who already
+    # has a valid token (stolen via XSS in a partner site or via CORS) can
+    # still forge state-changing requests. SAST rarely flags a *missing*
+    # config key, which is why this slips through.
     WTF_CSRF_ENABLED = False
-
-    # VULN — debug mode on in production (CWE-489)
-    DEBUG = True
