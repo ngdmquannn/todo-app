@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom"
-const img ="https://d3d7wgqajq3dzo.cloudfront.net/public/digital-nomad-3.png"
+const img ="/digital-nomad-3.png"
 
 const Home = ({user}) => {
     return (
