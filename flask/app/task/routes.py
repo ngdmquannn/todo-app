@@ -20,11 +20,9 @@ def search_tasks():
 
 @taskBp.route('/<int:task_id>/view', strict_slashes=False)
 @jwt_required(locations=["headers"])
-def view_any_task(task_id):
-    # VULN #6 (kept) — IDOR: missing ownership check, any authenticated user
-    # can read any task by incrementing id. Not flagged by common SAST rules
-    # because the code path looks structurally similar to legitimate reads.
-    task = Tasks.query.filter_by(id=task_id).first()
+def view_own_task(task_id):
+    current_user = int(get_jwt_identity())
+    task = Tasks.query.filter_by(id=task_id, user_id=current_user).first()
     if not task:
         return jsonify({"error": "not found"}), 404
     return jsonify(task.serialize()), 200
