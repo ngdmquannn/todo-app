@@ -1,0 +1,260 @@
+# Todo-app DevSecOps pipeline
+# Scanners: Trivy (fs + image), Semgrep (SAST), OWASP Dependency-Check (SCA)
+# Runner: Docker executor + docker-in-docker for build/scan/push
+#
+# Flow:
+#   sast       ──►  semgrep                               [allow_failure]
+#   sca        ──►  dependency-check + trivy-fs           [allow_failure]
+#   build      ──►  build-backend + build-frontend        (save tar artifact)
+#                                                         [allow_failure]
+#   image-scan ──►  trivy-image-backend + trivy-image-frontend
+#                     • main / dev = allow_failure (report only — demo)
+#                     • prod       = HARD GATE on HIGH/CRITICAL
+#   push       ──►  push-backend + push-frontend          (MANUAL)
+#                     • tags pushed: <branch>-latest + <branch>-<short-sha>
+
+stages:
+  - sast
+  - sca
+  - build
+  - image-scan
+  - push
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_HOST: tcp://docker:2375
+  IMAGE_TAG_LATEST: $CI_COMMIT_REF_SLUG-latest
+  IMAGE_TAG_SHA: $CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  TRIVY_VERSION: "0.56.2"
+  TRIVY_NO_PROGRESS: "true"
+  TRIVY_CACHE_DIR: ".trivycache/"
+
+# Skip pipeline if only .gitlab-ci.yml changed — avoids CI-editing loops.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - .gitlab-ci.yml
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - .gitlab-ci.yml
+      when: never
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev|prod)$/
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAST — Semgrep
+# ─────────────────────────────────────────────────────────────────────────────
+semgrep:
+  stage: sast
+  image: returntocorp/semgrep:latest
+  allow_failure: true
+  script:
+    - |
+      semgrep ci \
+        --config=p/security-audit \
+        --config=p/owasp-top-ten \
+        --config=p/python \
+        --config=p/flask \
+        --config=p/react \
+        --sarif --output=semgrep.sarif || true
+    - |
+      semgrep ci \
+        --config=p/security-audit \
+        --config=p/owasp-top-ten \
+        --config=p/python \
+        --config=p/flask \
+        --config=p/react \
+        --json --output=semgrep.json || true
+  artifacts:
+    when: always
+    paths:
+      - semgrep.sarif
+      - semgrep.json
+    reports:
+      sast: semgrep.sarif
+    expire_in: 1 week
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCA — OWASP Dependency-Check (Python + npm)
+# ─────────────────────────────────────────────────────────────────────────────
+dependency-check:
+  stage: sca
+  image:
+    name: owasp/dependency-check:latest
+    entrypoint: [""]
+  allow_failure: true
+  script:
+    - mkdir -p dc-report
+    - |
+      /usr/share/dependency-check/bin/dependency-check.sh \
+        --scan . \
+        --format ALL \
+        --out dc-report \
+        --project "todo-app" \
+        --disableAssembly || true
+  artifacts:
+    when: always
+    paths:
+      - dc-report/
+    reports:
+      dependency_scanning: dc-report/dependency-check-report.json
+    expire_in: 1 week
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCA — Trivy filesystem (parallel with dependency-check)
+# ─────────────────────────────────────────────────────────────────────────────
+trivy-fs:
+  stage: sca
+  image:
+    name: aquasec/trivy:${TRIVY_VERSION}
+    entrypoint: [""]
+  allow_failure: true
+  script:
+    - trivy --version
+    - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --format table .
+    - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --format json --output trivy-fs.json .
+  artifacts:
+    when: always
+    paths:
+      - trivy-fs.json
+    expire_in: 1 week
+  cache:
+    key: trivy-db
+    paths:
+      - .trivycache/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build — tarballs consumed by image-scan and push.
+# Two arms (backend/frontend) run in parallel via needs:[].
+# ─────────────────────────────────────────────────────────────────────────────
+.docker-build: &docker-build
+  stage: build
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  allow_failure: true
+
+build-backend:
+  <<: *docker-build
+  needs: []
+  script:
+    - docker build -t backend:$IMAGE_TAG_SHA -f flask/Dockerfile flask
+    - docker save backend:$IMAGE_TAG_SHA -o backend.tar
+  artifacts:
+    paths:
+      - backend.tar
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev|prod)$/
+
+build-frontend:
+  <<: *docker-build
+  needs: []
+  script:
+    - docker build -t frontend:$IMAGE_TAG_SHA -f react/Dockerfile react
+    - docker save frontend:$IMAGE_TAG_SHA -o frontend.tar
+  artifacts:
+    paths:
+      - frontend.tar
+    expire_in: 1 day
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev|prod)$/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Image scan — scans the tar before anything gets pushed.
+# main / dev  = allow_failure (report only — demo that findings exist)
+# prod        = hard gate: HIGH/CRITICAL fails the job, blocking push
+# ─────────────────────────────────────────────────────────────────────────────
+.trivy-image:
+  stage: image-scan
+  image:
+    name: aquasec/trivy:${TRIVY_VERSION}
+    entrypoint: [""]
+  script:
+    - trivy image --input $IMAGE_TAR --severity HIGH,CRITICAL --format table
+    - trivy image --input $IMAGE_TAR --severity HIGH,CRITICAL --format json --output trivy-image-${CI_JOB_NAME}.json
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "prod" ]; then
+        echo "prod hard gate — failing job if HIGH/CRITICAL present"
+        trivy image --input $IMAGE_TAR --severity HIGH,CRITICAL --exit-code 1
+      else
+        echo "$CI_COMMIT_BRANCH: report-only, not failing"
+      fi
+  artifacts:
+    when: always
+    paths:
+      - trivy-image-*.json
+    expire_in: 1 week
+  cache:
+    key: trivy-db
+    paths:
+      - .trivycache/
+
+trivy-image-backend:
+  extends: .trivy-image
+  variables:
+    IMAGE_TAR: backend.tar
+  needs: [build-backend]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "prod"
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev)$/
+      allow_failure: true
+
+trivy-image-frontend:
+  extends: .trivy-image
+  variables:
+    IMAGE_TAR: frontend.tar
+  needs: [build-frontend]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "prod"
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev)$/
+      allow_failure: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Push — MANUAL. Pushes two tags: <branch>-latest + <branch>-<short-sha>.
+# On prod this only becomes clickable if trivy-image-* passed.
+# ─────────────────────────────────────────────────────────────────────────────
+.docker-push: &docker-push
+  stage: push
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  before_script:
+    - echo "$REGISTRY_PASSWORD" | docker login -u "$REGISTRY_USER" --password-stdin
+
+push-backend:
+  <<: *docker-push
+  needs:
+    - job: build-backend
+      artifacts: true
+    - job: trivy-image-backend
+      optional: true
+  script:
+    - docker load -i backend.tar
+    - docker tag backend:$IMAGE_TAG_SHA $DOCKERHUB_BACKEND:$IMAGE_TAG_LATEST
+    - docker tag backend:$IMAGE_TAG_SHA $DOCKERHUB_BACKEND:$IMAGE_TAG_SHA
+    - docker push $DOCKERHUB_BACKEND:$IMAGE_TAG_LATEST
+    - docker push $DOCKERHUB_BACKEND:$IMAGE_TAG_SHA
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev|prod)$/
+      when: manual
+
+push-frontend:
+  <<: *docker-push
+  needs:
+    - job: build-frontend
+      artifacts: true
+    - job: trivy-image-frontend
+      optional: true
+  script:
+    - docker load -i frontend.tar
+    - docker tag frontend:$IMAGE_TAG_SHA $DOCKERHUB_FRONTEND:$IMAGE_TAG_LATEST
+    - docker tag frontend:$IMAGE_TAG_SHA $DOCKERHUB_FRONTEND:$IMAGE_TAG_SHA
+    - docker push $DOCKERHUB_FRONTEND:$IMAGE_TAG_LATEST
+    - docker push $DOCKERHUB_FRONTEND:$IMAGE_TAG_SHA
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev|prod)$/
+      when: manual
