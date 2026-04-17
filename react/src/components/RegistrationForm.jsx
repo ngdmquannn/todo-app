@@ -1,4 +1,4 @@
-const img = "https://d3d7wgqajq3dzo.cloudfront.net/public/designer-1c.png"
+const img = "/designer-1c.png"
 import { Link } from "react-router-dom"
 import { useState } from "react"
 import Notification from "./Notification"

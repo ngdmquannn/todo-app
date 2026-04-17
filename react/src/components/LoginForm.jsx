@@ -1,5 +1,5 @@
 import { useState } from "react"
-const img = "https://d3d7wgqajq3dzo.cloudfront.net/public/checklist-88.png"
+const img = "/checklist-88.png"
 import { Link } from "react-router-dom"
 import Notification from "./Notification"
 
