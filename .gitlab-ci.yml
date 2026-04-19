@@ -12,6 +12,8 @@
 #                     • prod       = HARD GATE on HIGH/CRITICAL
 #   push       ──►  push-backend + push-frontend          (MANUAL)
 #                     • tags pushed: <branch>-latest + <branch>-<short-sha>
+#   sign       ──►  sign-backend + sign-frontend          (auto sau push)
+#                     • cosign sign với key từ COSIGN_KEY variable
 
 stages:
   - sast
@@ -19,6 +21,7 @@ stages:
   - build
   - image-scan
   - push
+  - sign
 
 variables:
   DOCKER_DRIVER: overlay2
@@ -258,3 +261,37 @@ push-frontend:
   rules:
     - if: $CI_COMMIT_BRANCH =~ /^(main|dev|prod)$/
       when: manual
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sign — Cosign sign sau khi push thành công (key-based, no Rekor/Fulcio)
+# ─────────────────────────────────────────────────────────────────────────────
+.cosign-sign: &cosign-sign
+  stage: sign
+  image: alpine:3.19
+  before_script:
+    - apk add --no-cache curl
+    - curl -sL https://github.com/sigstore/cosign/releases/download/v2.4.3/cosign-linux-amd64 -o /usr/local/bin/cosign
+    - chmod +x /usr/local/bin/cosign
+    - echo "$COSIGN_KEY" | base64 -d > /tmp/cosign.key
+  after_script:
+    - rm -f /tmp/cosign.key
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^(main|dev|prod)$/
+
+sign-backend:
+  <<: *cosign-sign
+  needs:
+    - job: push-backend
+  script:
+    - cosign sign --key /tmp/cosign.key --tlog-upload=false $DOCKERHUB_BACKEND:$IMAGE_TAG_SHA
+    - cosign sign --key /tmp/cosign.key --tlog-upload=false $DOCKERHUB_BACKEND:$IMAGE_TAG_LATEST
+    - echo "SIGNED backend $DOCKERHUB_BACKEND:$IMAGE_TAG_SHA"
+
+sign-frontend:
+  <<: *cosign-sign
+  needs:
+    - job: push-frontend
+  script:
+    - cosign sign --key /tmp/cosign.key --tlog-upload=false $DOCKERHUB_FRONTEND:$IMAGE_TAG_SHA
+    - cosign sign --key /tmp/cosign.key --tlog-upload=false $DOCKERHUB_FRONTEND:$IMAGE_TAG_LATEST
+    - echo "SIGNED frontend $DOCKERHUB_FRONTEND:$IMAGE_TAG_SHA"
