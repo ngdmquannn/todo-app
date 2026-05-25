@@ -46,7 +46,7 @@ on:
 
 jobs:
   # ─────────────────────────────────────────────
-  # SAST — Semgrep (non-blocking, log finding)
+  # SAST — Semgrep (OWASP Top 10 + Security Audit)
   # ─────────────────────────────────────────────
   semgrep:
     name: "[${{ inputs.app_name }}] SAST (Semgrep)"
@@ -57,7 +57,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Semgrep
-        run: semgrep scan --config auto --sarif --output semgrep.sarif ${{ inputs.context }}
+        run: |
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/security-audit \
+            --config auto \
+            --sarif --output semgrep.sarif ${{ inputs.context }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -66,7 +71,7 @@ jobs:
           retention-days: 14
 
   # ─────────────────────────────────────────────
-  # SCA — Trivy FS (non-blocking, log finding)
+  # SCA — Trivy FS (vuln + secret + misconfig)
   # ─────────────────────────────────────────────
   trivy-fs:
     name: "[${{ inputs.app_name }}] SCA (Trivy FS)"
@@ -74,11 +79,12 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Trivy FS scan
+      - name: Trivy FS scan (vuln + secret + misconfig)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: ${{ inputs.context }}
+          scanners: vuln,secret,misconfig
           format: table
           exit-code: 0
           severity: HIGH,CRITICAL
