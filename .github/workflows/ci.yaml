@@ -12,6 +12,13 @@ on:
   pull_request:
     branches: [main]
 
+# Permissions phải declare ở caller — reusable workflow chỉ được dùng
+# quyền ≤ caller's permissions. Đây là yêu cầu của GitHub Actions.
+permissions:
+  contents: read
+  packages: write       # push image lên GHCR
+  actions: write        # cache type=gha cần quyền này
+
 jobs:
   # ─────────────────────────────────────────────
   # Frontend — React + Nginx
