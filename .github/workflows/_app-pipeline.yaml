@@ -1,0 +1,218 @@
+# Reusable workflow — DevSecOps pipeline cho 1 app trong monorepo
+#
+# Flow: SAST (Semgrep) + SCA (Trivy FS) → Build local → Trivy scan image
+#       → Push GHCR → Cosign sign (chỉ khi enable_sign=true, manual approve)
+#
+# Caller truyền inputs để tái sử dụng cho frontend/backend/service khác.
+# Xem .github/workflows/ci.yaml làm ví dụ caller.
+
+name: App Pipeline (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: "Tên app (frontend/backend/...) — dùng cho log + tag"
+        required: true
+        type: string
+      context:
+        description: "Build context (đường dẫn folder chứa Dockerfile)"
+        required: true
+        type: string
+      dockerfile:
+        description: "Đường dẫn Dockerfile (relative tới context)"
+        required: false
+        type: string
+        default: "Dockerfile"
+      image_name:
+        description: "Full image name vd: ghcr.io/ngdmquannn/todo-app-frontend"
+        required: true
+        type: string
+      enable_sign:
+        description: "Bật cosign sign (true = sign + approve, false = skip)"
+        required: false
+        type: boolean
+        default: false
+      sign_environment:
+        description: "GitHub Environment cho cosign approve"
+        required: false
+        type: string
+        default: "production-approve"
+    secrets:
+      COSIGN_PRIVATE_KEY:
+        required: false
+      COSIGN_PASSWORD:
+        required: false
+
+jobs:
+  # ─────────────────────────────────────────────
+  # SAST — Semgrep (non-blocking, log finding)
+  # ─────────────────────────────────────────────
+  semgrep:
+    name: "[${{ inputs.app_name }}] SAST (Semgrep)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Semgrep
+        run: semgrep scan --config auto --sarif --output semgrep.sarif ${{ inputs.context }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-${{ inputs.app_name }}-${{ github.run_id }}
+          path: semgrep.sarif
+          retention-days: 14
+
+  # ─────────────────────────────────────────────
+  # SCA — Trivy FS (non-blocking, log finding)
+  # ─────────────────────────────────────────────
+  trivy-fs:
+    name: "[${{ inputs.app_name }}] SCA (Trivy FS)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy FS scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.context }}
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+  # ─────────────────────────────────────────────
+  # Build to tar + Trivy scan image (no push)
+  # ─────────────────────────────────────────────
+  build-scan:
+    name: "[${{ inputs.app_name }}] Build & Scan Image"
+    runs-on: ubuntu-latest
+    needs: [semgrep, trivy-fs]
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_ref: ${{ inputs.image_name }}:${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image_name }}
+          tags: |
+            type=sha,prefix=${{ github.ref_name }}-,format=short
+            type=ref,event=branch
+          flavor: |
+            latest=false
+
+      - name: Build to tar
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ inputs.app_name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.app_name }}
+          outputs: type=docker,dest=/tmp/image-${{ inputs.app_name }}.tar
+
+      - name: Trivy scan tar image
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@master
+        with:
+          input: /tmp/image-${{ inputs.app_name }}.tar
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ inputs.app_name }}-${{ github.run_id }}
+          path: /tmp/image-${{ inputs.app_name }}.tar
+          retention-days: 1
+
+  # ─────────────────────────────────────────────
+  # Push image lên GHCR
+  # ─────────────────────────────────────────────
+  push:
+    name: "[${{ inputs.app_name }}] Push Image"
+    runs-on: ubuntu-latest
+    needs: build-scan
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+      image_ref: ${{ needs.build-scan.outputs.image_ref }}
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-${{ inputs.app_name }}-${{ github.run_id }}
+          path: /tmp
+
+      - name: Load image into docker daemon
+        run: docker load -i /tmp/image-${{ inputs.app_name }}.tar
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image (all tags)
+        id: push
+        run: |
+          docker push --all-tags ${{ inputs.image_name }}
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            ${{ needs.build-scan.outputs.image_ref }} | cut -d@ -f2)
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────
+  # Cosign sign — chỉ chạy khi caller bật enable_sign=true
+  # ─────────────────────────────────────────────
+  cosign:
+    name: "[${{ inputs.app_name }}] Sign (Cosign)"
+    runs-on: ubuntu-latest
+    needs: push
+    if: github.event_name == 'push' && inputs.enable_sign
+    environment: ${{ inputs.sign_environment }}    # pause chờ approve
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign image
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > /tmp/cosign.key
+          cosign sign --yes --key /tmp/cosign.key \
+            -a "app=${{ inputs.app_name }}" \
+            -a "git-sha=${{ github.sha }}" \
+            -a "branch=${{ github.ref_name }}" \
+            -a "run-id=${{ github.run_id }}" \
+            ${{ inputs.image_name }}@${{ needs.push.outputs.image_digest }}
+          rm -f /tmp/cosign.key
