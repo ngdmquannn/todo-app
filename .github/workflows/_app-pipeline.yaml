@@ -61,6 +61,14 @@ jobs:
           semgrep scan \
             --config p/owasp-top-ten \
             --config p/security-audit \
+            --config p/cwe-top-25 \
+            --config p/secrets \
+            --config p/python \
+            --config p/flask \
+            --config p/javascript \
+            --config p/typescript \
+            --config p/react \
+            --config p/dockerfile \
             --config auto \
             --sarif --output semgrep.sarif ${{ inputs.context }}
       - uses: actions/upload-artifact@v4
