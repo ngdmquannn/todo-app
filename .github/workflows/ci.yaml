@@ -1,0 +1,43 @@
+# CI caller — gọi reusable workflow `_app-pipeline.yaml` cho từng app
+# trong monorepo (frontend + backend).
+#
+# Mỗi caller job chạy 1 pipeline đầy đủ song song:
+#   SAST → SCA → build-scan → push → (cosign nếu prod)
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev, prod]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Frontend — React + Nginx
+  # ─────────────────────────────────────────────
+  frontend:
+    name: Frontend
+    uses: ./.github/workflows/_app-pipeline.yaml
+    with:
+      app_name: frontend
+      context: ./react
+      image_name: ghcr.io/ngdmquannn/todo-app-frontend
+      # Sign chỉ khi push prod
+      enable_sign: ${{ github.ref_name == 'prod' }}
+      sign_environment: production-approve
+    secrets: inherit
+
+  # ─────────────────────────────────────────────
+  # Backend — Flask
+  # ─────────────────────────────────────────────
+  backend:
+    name: Backend
+    uses: ./.github/workflows/_app-pipeline.yaml
+    with:
+      app_name: backend
+      context: ./flask
+      image_name: ghcr.io/ngdmquannn/todo-app-backend
+      enable_sign: ${{ github.ref_name == 'prod' }}
+      sign_environment: production-approve
+    secrets: inherit
