@@ -43,6 +43,9 @@ on:
         required: false
       COSIGN_PASSWORD:
         required: false
+      NVD_API_KEY:
+        description: "NVD API key cho OWASP Dependency-Check (optional — có key thì tải NVD nhanh & tránh rate-limit)"
+        required: false
 
 jobs:
   # ─────────────────────────────────────────────
@@ -99,12 +102,53 @@ jobs:
           ignore-unfixed: true
 
   # ─────────────────────────────────────────────
+  # SCA — OWASP Dependency-Check (deps → CVE qua NVD)
+  # Bổ trợ Trivy: map requirements.txt / package-lock.json → CVE,
+  # xuất SARIF + HTML report để audit/nộp coursework.
+  # ─────────────────────────────────────────────
+  dependency-check:
+    name: "[${{ inputs.app_name }}] SCA (OWASP Dependency-Check)"
+    runs-on: ubuntu-latest
+    continue-on-error: true            # report-only, không chặn pipeline
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache NVD data — lần sau khỏi tải lại (đỡ chậm kể cả khi chưa có key)
+      - name: Cache NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.dependency-check/data
+          key: dependency-check-nvd-${{ inputs.app_name }}
+          restore-keys: |
+            dependency-check-nvd-
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "${{ inputs.app_name }}"
+          path: ${{ inputs.context }}
+          # SARIF (cho code-scanning) + HTML (report đẹp để nộp/audit)
+          format: "ALL"
+          out: reports
+          args: >-
+            --enableExperimental
+            ${{ secrets.NVD_API_KEY != '' && format('--nvdApiKey {0}', secrets.NVD_API_KEY) || '' }}
+
+      - name: Upload Dependency-Check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-${{ inputs.app_name }}-${{ github.run_id }}
+          path: reports
+          retention-days: 14
+
+  # ─────────────────────────────────────────────
   # Build to tar + Trivy scan image (no push)
   # ─────────────────────────────────────────────
   build-scan:
     name: "[${{ inputs.app_name }}] Build & Scan Image"
     runs-on: ubuntu-latest
-    needs: [semgrep, trivy-fs]
+    needs: [semgrep, trivy-fs, dependency-check]
     if: github.event_name == 'push'
     permissions:
       contents: read
