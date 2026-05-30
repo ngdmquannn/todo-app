@@ -130,8 +130,14 @@ jobs:
           # SARIF (cho code-scanning) + HTML (report đẹp để nộp/audit)
           format: "ALL"
           out: reports
+          # --disableNodeAudit : npm Audit API đổi payload → ODC submit sai
+          #   gây "Invalid payload" → frontend (package-lock.json) fail.
+          #   Vẫn giữ NVD CPE + RetireJS để quét vuln JS.
+          # --disableOssIndex   : OSS Index nay bắt buộc token, không có → bỏ.
           args: >-
             --enableExperimental
+            --disableNodeAudit
+            --disableOssIndex
             ${{ secrets.NVD_API_KEY != '' && format('--nvdApiKey {0}', secrets.NVD_API_KEY) || '' }}
 
       - name: Upload Dependency-Check report
