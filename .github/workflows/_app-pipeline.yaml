@@ -55,6 +55,9 @@ jobs:
     name: "[${{ inputs.app_name }}] SAST (Semgrep)"
     runs-on: ubuntu-latest
     continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF lên Code Scanning
     container:
       image: semgrep/semgrep
     steps:
@@ -80,6 +83,13 @@ jobs:
           name: semgrep-${{ inputs.app_name }}-${{ github.run_id }}
           path: semgrep.sarif
           retention-days: 14
+      # Đẩy lên Security tab — category riêng theo app để FE/BE không đè nhau
+      - name: Upload Semgrep SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep-${{ inputs.app_name }}
 
   # ─────────────────────────────────────────────
   # SCA — Trivy FS (vuln + secret + misconfig)
@@ -88,9 +98,13 @@ jobs:
     name: "[${{ inputs.app_name }}] SCA (Trivy FS)"
     runs-on: ubuntu-latest
     continue-on-error: true
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF lên Code Scanning
     steps:
       - uses: actions/checkout@v4
-      - name: Trivy FS scan (vuln + secret + misconfig)
+      # Bản table — in ra log cho dễ đọc trực tiếp
+      - name: Trivy FS scan (table to log)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
@@ -100,6 +114,24 @@ jobs:
           exit-code: 0
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+      # Bản SARIF — đẩy lên Security tab
+      - name: Trivy FS scan (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: ${{ inputs.context }}
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: 0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+      - name: Upload Trivy SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-${{ inputs.app_name }}
 
   # ─────────────────────────────────────────────
   # SCA — OWASP Dependency-Check (deps → CVE qua NVD)
@@ -110,6 +142,9 @@ jobs:
     name: "[${{ inputs.app_name }}] SCA (OWASP Dependency-Check)"
     runs-on: ubuntu-latest
     continue-on-error: true            # report-only, không chặn pipeline
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF lên Code Scanning
     steps:
       - uses: actions/checkout@v4
 
@@ -147,6 +182,13 @@ jobs:
           name: dependency-check-${{ inputs.app_name }}-${{ github.run_id }}
           path: reports
           retention-days: 14
+
+      - name: Upload Dependency-Check SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/dependency-check-report.sarif
+          category: owasp-dc-${{ inputs.app_name }}
 
   # ─────────────────────────────────────────────
   # Build to tar + Trivy scan image (no push)

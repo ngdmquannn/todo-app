@@ -16,8 +16,9 @@ on:
 # quyền ≤ caller's permissions. Đây là yêu cầu của GitHub Actions.
 permissions:
   contents: read
-  packages: write       # push image lên GHCR
-  actions: write        # cache type=gha cần quyền này
+  packages: write          # push image lên GHCR
+  actions: write           # cache type=gha cần quyền này
+  security-events: write   # upload SARIF lên Code Scanning (Security tab)
 
 jobs:
   # ─────────────────────────────────────────────
