@@ -281,6 +281,7 @@ jobs:
     outputs:
       image_digest: ${{ steps.push.outputs.digest }}
       image_ref: ${{ needs.build-scan.outputs.image_ref }}
+      image_tag: ${{ needs.build-scan.outputs.image_tag }}   # forward cho job release
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v4
@@ -318,6 +319,11 @@ jobs:
     needs: push
     if: github.event_name == 'push' && (inputs.enable_sign || inputs.enable_deploy)
     environment: ${{ inputs.sign_environment }}    # pause chờ approve (1 lần)
+    # Serialize deploy: FE/BE cùng commit vào 1 repo GitOps → cho chạy
+    # tuần tự thay vì song song để tránh đua push (kèm retry+rebase ở dưới).
+    concurrency:
+      group: gitops-deploy-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -354,11 +360,16 @@ jobs:
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_GITOPS_TOKEN }}
           IMAGE: ${{ inputs.image_name }}
-          TAG: ${{ needs.build-scan.outputs.image_tag }}
+          TAG: ${{ needs.push.outputs.image_tag }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GITOPS_FILES: ${{ inputs.gitops_files }}
         run: |
           set -euo pipefail
+          # Guard: tuyệt đối không commit image thiếu tag vào GitOps
+          if [ -z "${TAG}" ]; then
+            echo "✗ TAG rỗng — abort để không ghi image hỏng vào GitOps." >&2
+            exit 1
+          fi
           git clone "https://oauth2:${GITLAB_TOKEN}@${GITOPS_REPO}" gitops
           cd gitops
 
@@ -380,13 +391,27 @@ jobs:
 
           if git diff --quiet; then
             echo "Không có thay đổi tag — bỏ qua commit."
-          else
-            git add ${GITOPS_FILES}
-            git commit -m "chore(${{ inputs.app_name }}): bump image to ${TAG}
-
-            source-repo: ${{ github.repository }}
-            git-sha: ${{ github.sha }}
-            run-id: ${{ github.run_id }}"
-            git push origin HEAD
-            echo "✓ Đã push tag mới lên GitOps — ArgoCD sẽ sync."
+            exit 0
           fi
+
+          git add ${GITOPS_FILES}
+          git commit -m "chore(${{ inputs.app_name }}): bump image to ${TAG}
+
+          source-repo: ${{ github.repository }}
+          git-sha: ${{ github.sha }}
+          run-id: ${{ github.run_id }}"
+
+          # Retry + rebase: FE/BE release chạy song song cùng push vào main,
+          # đứa sau sẽ bị reject (non-fast-forward). Rebase lên remote mới rồi
+          # push lại — patch của ta chỉ đụng 1 file nên không bao giờ conflict.
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          for i in 1 2 3 4 5; do
+            if git push origin "HEAD:${BRANCH}"; then
+              echo "✓ Đã push tag mới lên GitOps — ArgoCD sẽ sync."
+              exit 0
+            fi
+            echo "↻ push bị reject (lần $i) — rebase lên remote rồi thử lại…"
+            git pull --rebase origin "${BRANCH}"
+          done
+          echo "✗ Push thất bại sau 5 lần thử." >&2
+          exit 1
