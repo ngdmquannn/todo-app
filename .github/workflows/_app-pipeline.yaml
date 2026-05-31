@@ -397,11 +397,14 @@ jobs:
           fi
 
           git add ${GITOPS_FILES}
-          git commit -m "chore(${{ inputs.app_name }}): bump image to ${TAG}
-
-          source-repo: ${{ github.repository }}
-          git-sha: ${{ github.sha }}
-          run-id: ${{ github.run_id }}"
+          # Nhiều -m để body không bị dính indent của YAML 'run: |'
+          git commit \
+            -m "[CI-PIPELINE] Update ${NEW_IMAGE}" \
+            -m "image: ${NEW_IMAGE}" \
+            -m "app: ${{ inputs.app_name }}" \
+            -m "source-repo: ${{ github.repository }}" \
+            -m "git-sha: ${{ github.sha }}" \
+            -m "run-id: ${{ github.run_id }}"
 
           # Retry + rebase: FE/BE release chạy song song cùng push vào main,
           # đứa sau sẽ bị reject (non-fast-forward). Rebase lên remote mới rồi
