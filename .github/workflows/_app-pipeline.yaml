@@ -231,8 +231,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ inputs.image_name }}
+          # priority cao hơn type=ref(branch,600) để outputs.version = tag sha
+          # (vd main-b1fd626) thay vì chỉ 'main' — TAG này dùng patch GitOps.
           tags: |
-            type=sha,prefix=${{ github.ref_name }}-,format=short
+            type=sha,prefix=${{ github.ref_name }}-,format=short,priority=900
             type=ref,event=branch
           flavor: |
             latest=false
