@@ -378,6 +378,15 @@ jobs:
           export NEW_IMAGE="${IMAGE}:${TAG}"
           echo "→ Patch image -> ${NEW_IMAGE}"
 
+          # Đọc tag CŨ (trước khi patch) để ghi 'change: <cũ> -> <mới>' vào commit.
+          # Lấy tag từ file đầu tiên có image khớp; rỗng nếu chưa có.
+          OLD_TAG=""
+          for f in ${GITOPS_FILES}; do
+            cur=$(IMAGE="$IMAGE" yq '[.. | select(tag == "!!map" and (.image // "" | test("^" + strenv(IMAGE) + ":"))).image] | .0 // ""' "$f")
+            if [ -n "$cur" ] && [ "$cur" != "null" ]; then OLD_TAG="${cur##*:}"; break; fi
+          done
+          [ -z "$OLD_TAG" ] && OLD_TAG="(none)"
+
           # yq (mikefarah v4, có sẵn trên runner): duyệt mọi map có .image,
           # chỉ thay khi image khớp prefix "${IMAGE}:" — giữ nguyên container khác,
           # giữ indent, an toàn với manifest multi-document (---).
@@ -396,15 +405,16 @@ jobs:
             exit 0
           fi
 
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Body gom trong 1 -m (printf giữ format căn chỉnh, không dính indent YAML).
           git add ${GITOPS_FILES}
-          # Nhiều -m để body không bị dính indent của YAML 'run: |'
           git commit \
-            -m "[CI-PIPELINE] Update ${NEW_IMAGE}" \
-            -m "image: ${NEW_IMAGE}" \
-            -m "app: ${{ inputs.app_name }}" \
-            -m "source-repo: ${{ github.repository }}" \
-            -m "git-sha: ${{ github.sha }}" \
-            -m "run-id: ${{ github.run_id }}"
+            -m "[CI-PIPELINE] Update ${{ inputs.app_name }}: ${OLD_TAG} -> ${TAG}" \
+            -m "$(printf 'image:      %s\nchange:     %s -> %s\napp:        %s\nsource:     %s@%s\ntriggered:  %s\nrun-url:    %s' \
+                  "${NEW_IMAGE}" "${OLD_TAG}" "${TAG}" "${{ inputs.app_name }}" \
+                  "${{ github.repository }}" "${SHORT_SHA}" "${{ github.actor }}" "${RUN_URL}")"
 
           # Retry + rebase: FE/BE release chạy song song cùng push vào main,
           # đứa sau sẽ bị reject (non-fast-forward). Rebase lên remote mới rồi
