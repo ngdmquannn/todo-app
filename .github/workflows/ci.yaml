@@ -34,6 +34,10 @@ jobs:
       image_name: ghcr.io/ngdmquannn/todo-app-frontend
       # Sign chỉ khi push prod
       enable_sign: ${{ github.ref_name == 'prod' }}
+      # Deploy GitOps mọi branch — job release chờ approve (production-approve)
+      enable_deploy: true
+      gitops_repo: gitlab.com/chow612/devsecops.git
+      gitops_files: apps/todo-app/frontend.yaml
       sign_environment: production-approve
     secrets: inherit
 
@@ -48,5 +52,8 @@ jobs:
       context: ./flask
       image_name: ghcr.io/ngdmquannn/todo-app-backend
       enable_sign: ${{ github.ref_name == 'prod' }}
+      enable_deploy: true
+      gitops_repo: gitlab.com/chow612/devsecops.git
+      gitops_files: apps/todo-app/backend.yaml
       sign_environment: production-approve
     secrets: inherit
