@@ -34,10 +34,25 @@ on:
         type: boolean
         default: false
       sign_environment:
-        description: "GitHub Environment cho cosign approve"
+        description: "GitHub Environment cho release approve (cosign + deploy GitOps)"
         required: false
         type: string
         default: "production-approve"
+      enable_deploy:
+        description: "Bật update GitOps repo (patch image tag) trong job release"
+        required: false
+        type: boolean
+        default: false
+      gitops_repo:
+        description: "Repo GitOps trên GitLab, vd: gitlab.com/chow612/devsecops.git"
+        required: false
+        type: string
+        default: ""
+      gitops_files:
+        description: "Danh sách file manifest cần patch tag (cách nhau bởi space), relative tới repo GitOps"
+        required: false
+        type: string
+        default: ""
     secrets:
       COSIGN_PRIVATE_KEY:
         required: false
@@ -45,6 +60,9 @@ on:
         required: false
       NVD_API_KEY:
         description: "NVD API key cho OWASP Dependency-Check (optional — có key thì tải NVD nhanh & tránh rate-limit)"
+        required: false
+      GITLAB_GITOPS_TOKEN:
+        description: "GitLab token (write_repository) để commit tag mới vào repo GitOps"
         required: false
 
 jobs:
@@ -289,21 +307,27 @@ jobs:
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
   # ─────────────────────────────────────────────
-  # Cosign sign — chỉ chạy khi caller bật enable_sign=true
+  # Release — gộp Cosign sign + update GitOps (deploy)
+  # 1 lần approve qua environment. Chạy khi enable_sign HOẶC enable_deploy.
+  #   • cosign : chỉ khi enable_sign=true (vd prod)
+  #   • deploy : chỉ khi enable_deploy=true → patch tag vào repo GitOps
   # ─────────────────────────────────────────────
-  cosign:
-    name: "[${{ inputs.app_name }}] Sign (Cosign)"
+  release:
+    name: "[${{ inputs.app_name }}] Release (Sign + Deploy)"
     runs-on: ubuntu-latest
     needs: push
-    if: github.event_name == 'push' && inputs.enable_sign
-    environment: ${{ inputs.sign_environment }}    # pause chờ approve
+    if: github.event_name == 'push' && (inputs.enable_sign || inputs.enable_deploy)
+    environment: ${{ inputs.sign_environment }}    # pause chờ approve (1 lần)
     permissions:
       contents: read
       packages: write
     steps:
+      # ── Cosign sign (chỉ khi enable_sign) ──────────────
       - uses: sigstore/cosign-installer@v3
+        if: inputs.enable_sign
 
       - name: Login to GHCR
+        if: inputs.enable_sign
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -311,6 +335,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Sign image
+        if: inputs.enable_sign
         env:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
@@ -322,3 +347,46 @@ jobs:
             -a "run-id=${{ github.run_id }}" \
             ${{ inputs.image_name }}@${{ needs.push.outputs.image_digest }}
           rm -f /tmp/cosign.key
+
+      # ── Update GitOps (chỉ khi enable_deploy) ──────────
+      - name: Patch image tag in GitOps repo
+        if: inputs.enable_deploy
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_GITOPS_TOKEN }}
+          IMAGE: ${{ inputs.image_name }}
+          TAG: ${{ needs.build-scan.outputs.image_tag }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_FILES: ${{ inputs.gitops_files }}
+        run: |
+          set -euo pipefail
+          git clone "https://oauth2:${GITLAB_TOKEN}@${GITOPS_REPO}" gitops
+          cd gitops
+
+          export NEW_IMAGE="${IMAGE}:${TAG}"
+          echo "→ Patch image -> ${NEW_IMAGE}"
+
+          # yq (mikefarah v4, có sẵn trên runner): duyệt mọi map có .image,
+          # chỉ thay khi image khớp prefix "${IMAGE}:" — giữ nguyên container khác,
+          # giữ indent, an toàn với manifest multi-document (---).
+          for f in ${GITOPS_FILES}; do
+            echo "  • $f"
+            IMAGE="$IMAGE" NEW_IMAGE="$NEW_IMAGE" yq -i \
+              '(.. | select(tag == "!!map" and (.image // "" | test("^" + strenv(IMAGE) + ":"))).image) = strenv(NEW_IMAGE)' \
+              "$f"
+          done
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "Không có thay đổi tag — bỏ qua commit."
+          else
+            git add ${GITOPS_FILES}
+            git commit -m "chore(${{ inputs.app_name }}): bump image to ${TAG}
+
+            source-repo: ${{ github.repository }}
+            git-sha: ${{ github.sha }}
+            run-id: ${{ github.run_id }}"
+            git push origin HEAD
+            echo "✓ Đã push tag mới lên GitOps — ArgoCD sẽ sync."
+          fi
