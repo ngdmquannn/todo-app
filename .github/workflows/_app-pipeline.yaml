@@ -215,7 +215,8 @@ jobs:
     name: "[${{ inputs.app_name }}] Build & Scan Image"
     runs-on: ubuntu-latest
     needs: [semgrep, trivy-fs, dependency-check]
-    if: github.event_name == 'push'
+    # Chạy với push & manual (workflow_dispatch); chỉ PR mới skip build/push.
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       actions: write
@@ -276,7 +277,7 @@ jobs:
     name: "[${{ inputs.app_name }}] Push Image"
     runs-on: ubuntu-latest
     needs: build-scan
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: write
@@ -319,7 +320,7 @@ jobs:
     name: "[${{ inputs.app_name }}] Release (Sign + Deploy)"
     runs-on: ubuntu-latest
     needs: push
-    if: github.event_name == 'push' && (inputs.enable_sign || inputs.enable_deploy)
+    if: github.event_name != 'pull_request' && (inputs.enable_sign || inputs.enable_deploy)
     environment: ${{ inputs.sign_environment }}    # pause chờ approve (1 lần)
     # Serialize deploy: FE/BE cùng commit vào 1 repo GitOps → cho chạy
     # tuần tự thay vì song song để tránh đua push (kèm retry+rebase ở dưới).
