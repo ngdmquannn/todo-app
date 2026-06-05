@@ -215,7 +215,8 @@ jobs:
     name: "[${{ inputs.app_name }}] Build & Scan Image"
     runs-on: ubuntu-latest
     needs: [semgrep, trivy-fs, dependency-check]
-    if: github.event_name == 'push'
+    # Chạy với push & manual (workflow_dispatch); chỉ PR mới skip build/push.
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       actions: write
@@ -231,8 +232,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ inputs.image_name }}
+          # priority cao hơn type=ref(branch,600) để outputs.version = tag sha
+          # (vd main-b1fd626) thay vì chỉ 'main' — TAG này dùng patch GitOps.
           tags: |
-            type=sha,prefix=${{ github.ref_name }}-,format=short
+            type=sha,prefix=${{ github.ref_name }}-,format=short,priority=900
             type=ref,event=branch
           flavor: |
             latest=false
@@ -274,13 +277,14 @@ jobs:
     name: "[${{ inputs.app_name }}] Push Image"
     runs-on: ubuntu-latest
     needs: build-scan
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: write
     outputs:
       image_digest: ${{ steps.push.outputs.digest }}
       image_ref: ${{ needs.build-scan.outputs.image_ref }}
+      image_tag: ${{ needs.build-scan.outputs.image_tag }}   # forward cho job release
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v4
@@ -316,8 +320,13 @@ jobs:
     name: "[${{ inputs.app_name }}] Release (Sign + Deploy)"
     runs-on: ubuntu-latest
     needs: push
-    if: github.event_name == 'push' && (inputs.enable_sign || inputs.enable_deploy)
+    if: github.event_name != 'pull_request' && (inputs.enable_sign || inputs.enable_deploy)
     environment: ${{ inputs.sign_environment }}    # pause chờ approve (1 lần)
+    # Serialize deploy: FE/BE cùng commit vào 1 repo GitOps → cho chạy
+    # tuần tự thay vì song song để tránh đua push (kèm retry+rebase ở dưới).
+    concurrency:
+      group: gitops-deploy-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -354,16 +363,30 @@ jobs:
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_GITOPS_TOKEN }}
           IMAGE: ${{ inputs.image_name }}
-          TAG: ${{ needs.build-scan.outputs.image_tag }}
+          TAG: ${{ needs.push.outputs.image_tag }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GITOPS_FILES: ${{ inputs.gitops_files }}
         run: |
           set -euo pipefail
+          # Guard: tuyệt đối không commit image thiếu tag vào GitOps
+          if [ -z "${TAG}" ]; then
+            echo "✗ TAG rỗng — abort để không ghi image hỏng vào GitOps." >&2
+            exit 1
+          fi
           git clone "https://oauth2:${GITLAB_TOKEN}@${GITOPS_REPO}" gitops
           cd gitops
 
           export NEW_IMAGE="${IMAGE}:${TAG}"
           echo "→ Patch image -> ${NEW_IMAGE}"
+
+          # Đọc tag CŨ (trước khi patch) để ghi 'change: <cũ> -> <mới>' vào commit.
+          # Lấy tag từ file đầu tiên có image khớp; rỗng nếu chưa có.
+          OLD_TAG=""
+          for f in ${GITOPS_FILES}; do
+            cur=$(IMAGE="$IMAGE" yq '[.. | select(tag == "!!map" and (.image // "" | test("^" + strenv(IMAGE) + ":"))).image] | .0 // ""' "$f")
+            if [ -n "$cur" ] && [ "$cur" != "null" ]; then OLD_TAG="${cur##*:}"; break; fi
+          done
+          [ -z "$OLD_TAG" ] && OLD_TAG="(none)"
 
           # yq (mikefarah v4, có sẵn trên runner): duyệt mọi map có .image,
           # chỉ thay khi image khớp prefix "${IMAGE}:" — giữ nguyên container khác,
@@ -380,13 +403,31 @@ jobs:
 
           if git diff --quiet; then
             echo "Không có thay đổi tag — bỏ qua commit."
-          else
-            git add ${GITOPS_FILES}
-            git commit -m "chore(${{ inputs.app_name }}): bump image to ${TAG}
-
-            source-repo: ${{ github.repository }}
-            git-sha: ${{ github.sha }}
-            run-id: ${{ github.run_id }}"
-            git push origin HEAD
-            echo "✓ Đã push tag mới lên GitOps — ArgoCD sẽ sync."
+            exit 0
           fi
+
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Body gom trong 1 -m (printf giữ format căn chỉnh, không dính indent YAML).
+          git add ${GITOPS_FILES}
+          git commit \
+            -m "[CI-PIPELINE] Update ${{ inputs.app_name }}: ${OLD_TAG} -> ${TAG}" \
+            -m "$(printf 'image:      %s\nchange:     %s -> %s\napp:        %s\nsource:     %s@%s\ntriggered:  %s\nrun-url:    %s' \
+                  "${NEW_IMAGE}" "${OLD_TAG}" "${TAG}" "${{ inputs.app_name }}" \
+                  "${{ github.repository }}" "${SHORT_SHA}" "${{ github.actor }}" "${RUN_URL}")"
+
+          # Retry + rebase: FE/BE release chạy song song cùng push vào main,
+          # đứa sau sẽ bị reject (non-fast-forward). Rebase lên remote mới rồi
+          # push lại — patch của ta chỉ đụng 1 file nên không bao giờ conflict.
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          for i in 1 2 3 4 5; do
+            if git push origin "HEAD:${BRANCH}"; then
+              echo "✓ Đã push tag mới lên GitOps — ArgoCD sẽ sync."
+              exit 0
+            fi
+            echo "↻ push bị reject (lần $i) — rebase lên remote rồi thử lại…"
+            git pull --rebase origin "${BRANCH}"
+          done
+          echo "✗ Push thất bại sau 5 lần thử." >&2
+          exit 1
